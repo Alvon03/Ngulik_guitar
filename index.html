@@ -279,9 +279,9 @@ input[type=range]{accent-color:var(--glow);height:28px}
     <li><span><b>Chord</b> terbaca paling bagus dari genjrengan atau petikan yang jelas. Lagu full band juga bisa, tapi kadang chord-nya meleset ke chord tetangga.</span></li>
     <li><span><b>Melodi</b> paling akurat kalau satu nada sekaligus, misalnya intro, isian, atau melodi solo.</span></li>
     <li><span><b>Pelan-pelan dulu:</b> putar 0.5× buat ngulik bagian cepat; chord dan nadanya tetap terbaca dari hasil analisis.</span></li>
-    <li><span><b>Diagram chord</b> pakai bentuk yang paling umum: open chord kalau ada, kalau tidak pakai barre.</span></li>
+    <li><span><b>Diagram chord</b> pakai bentuk yang paling umum: open chord kalau ada, kalau tidak pakai barre. Chord 7, maj7, m7, sus2 dan sus4 juga dikenali.</span></li>
   </ul>
-  <p class="ver">Ngulik Gitar by Alvon · versi 1.0</p>
+  <p class="ver">Ngulik Gitar by Alvon · versi 1.1</p>
 </div>
 
 <script>
@@ -360,10 +360,8 @@ function getFFT(n){
   const re=new Float32Array(n),im=new Float32Array(n);
   return fftCache[n]={n,rev,cos,sin,win,re,im};
 }
-function chromaOf(x,sr){
-  const n=x.length,F=getFFT(n),re=F.re,im=F.im;
-  let e=0;
-  for(let i=0;i<n;i++){const j=F.rev[i];re[j]=x[i]*F.win[i];im[j]=0;e+=x[i]*x[i];}
+function fftInPlace(F){
+  const n=F.n,re=F.re,im=F.im;
   for(let size=2;size<=n;size<<=1){
     const half=size>>1,step=n/size;
     for(let i=0;i<n;i+=size)for(let j=0;j<half;j++){
@@ -372,56 +370,114 @@ function chromaOf(x,sr){
       re[b]=re[a]-tr;im[b]=im[a]-ti;re[a]+=tr;im[a]+=ti;
     }
   }
-  const ch=new Float32Array(12),bass=new Float32Array(12);
-  const kmin=Math.ceil(70*n/sr),kmax=Math.min(n/2-1,Math.floor(2100*n/sr));
-  for(let k=kmin;k<=kmax;k++){
-    const mag=Math.hypot(re[k],im[k]);if(mag<1e-6)continue;
-    const f=k*sr/n,m=69+12*Math.log2(f/440),r=Math.round(m),d=Math.abs(m-r);
-    if(d>0.35)continue;
-    const w=Math.log1p(mag*8)*(1-d/0.35)*(f<330?1:Math.pow(330/f,0.8)),pc=((r%12)+12)%12;
-    ch[pc]+=w;if(f<270)bass[pc]+=w;
-  }
-  return{ch,bass,rms:Math.sqrt(e/n)};
 }
-const TYPES=[{suf:'',iv:[0,4,7],w:[1,1,.9],bias:1},{suf:'m',iv:[0,3,7],w:[1,1,.9],bias:1},{suf:'7',iv:[0,4,7,10],w:[1,1,.9,.8],bias:.95}];
+// Spektrum -> kekuatan tiap nada (E1..F#6) dengan pengurangan harmonik, lalu chroma & bass
+const PM0=28,PM1=90;
+const CP={SM:3,PEN:0.6,KEY:true,HG:0,HF:0.3,MR:0.5,LEAD:1.3,R7:0,R7M:0.6,HC:0.5,R7m:0.9,FP:0.06,FPF:0.3,SALALL:true,RA1:0.015,RA2:0.05,OH:0.01,B7:0.975,BM7:0.95,BS:0.94,BS2:0.92,H3:0.2};
+function noteSalience(x,sr){
+  const n=x.length,F=getFFT(n),re=F.re,im=F.im;
+  let e=0;
+  for(let i=0;i<n;i++){const j=F.rev[i];re[j]=x[i]*F.win[i];im[j]=0;e+=x[i]*x[i];}
+  fftInPlace(F);
+  const mag=new Float32Array(n/2);for(let k=1;k<n/2;k++)mag[k]=Math.hypot(re[k],im[k]);
+  const a=new Float32Array(PM1+1);
+  // tiap puncak spektrum diberikan ke satu nada terdekat (tidak melebar ke nada tetangga)
+  const kmax=Math.min(n/2-2,Math.ceil(440*Math.pow(2,(PM1+0.5-69)/12)*n/sr));
+  for(let k=2;k<=kmax;k++){
+    const m0=mag[k];if(m0<=mag[k-1]||m0<mag[k+1])continue;
+    const al=Math.log(mag[k-1]+1e-9),be=Math.log(m0),ga=Math.log(mag[k+1]+1e-9),den=al-2*be+ga;
+    const off=den<0?0.5*(al-ga)/den:0,f=(k+off)*sr/n,mf=69+12*Math.log2(f/440),m=Math.round(mf);
+    if(m<PM0||m>PM1||Math.abs(mf-m)>0.4)continue;
+    if(m0>a[m])a[m]=m0;
+  }
+  // buang lantai derau
+  const sorted=Array.from(a.subarray(PM0)).sort((p,q)=>p-q),floor=sorted[sorted.length>>1]*1.2;
+  for(let m=PM0;m<=PM1;m++)a[m]=Math.max(0,a[m]-floor);
+  // pengurangan harmonik: nada rendah "memiliki" harmoniknya
+  const H=[[12,.8],[19,.6],[24,.45],[28,.35],[31,.3],[34,.22],[36,.2]];
+  if(CP.HG>0)for(let m=PM0;m<=PM1;m++){if(a[m]<=0)continue;for(const[d,g]of H){const t=m+d;if(t>PM1)break;a[t]=Math.max(a[t]*CP.HF,a[t]-a[m]*g*CP.HG);}}
+  if(CP.H3>0){const b=Float32Array.from(a);for(let m=40;m<=PM1;m++){if(b[m]<=0)continue;for(const[d,g]of[[19,1],[28,0.6]]){const t=m+d;if(t>PM1)break;a[t]=Math.max(a[t]*0.15,a[t]-b[m]*g*CP.H3);}}}
+  return{a,rms:Math.sqrt(e/n)};
+}
+function chromaFromNotes(a){
+  const ch=new Float32Array(12),bass=new Float32Array(12);
+  let mx=0,mxT=0;for(let m=PM0;m<=PM1;m++){if(a[m]>mx)mx=a[m];if(m>=40&&a[m]>mxT)mxT=a[m];}
+  if(mx<=0)return{ch,bass,bassPc:-1};
+  for(let m=40;m<=PM1;m++){if(a[m]<=0||mxT<=0)continue;ch[m%12]+=Math.pow(a[m]/mxT,0.45);}
+  for(let m=PM0;m<=55;m++){if(a[m]<=0)continue;bass[m%12]+=Math.pow(a[m]/mx,0.45)*(m<=47?1:0.5);}
+  // nada bass = nada terendah yang cukup kuat
+  let bmx=0;for(let m=PM0;m<=55;m++)if(a[m]>bmx)bmx=a[m];
+  let bassPc=-1;if(bmx>mx*0.12)for(let m=PM0;m<=55;m++)if(a[m]>bmx*0.35){bassPc=m%12;break;}
+  return{ch,bass,bassPc};
+}
+function chromaOf(x,sr){const r=noteSalience(x,sr),c=chromaFromNotes(r.a);return{ch:c.ch,bass:c.bass,bassPc:c.bassPc,rms:r.rms,a:r.a};}
+const TYPES=[
+  {suf:'',iv:[0,4,7],w:[1,1,.8],bias:1},
+  {suf:'m',iv:[0,3,7],w:[1,1,.8],bias:1},
+  {suf:'7',iv:[0,4,7,10],w:[1,1,.8,.85],bias:'B7'},
+  {suf:'maj7',iv:[0,4,7,11],w:[1,1,.8,.85],bias:'BM7'},
+  {suf:'m7',iv:[0,3,7,10],w:[1,1,.8,.85],bias:'B7'},
+  {suf:'sus4',iv:[0,5,7],w:[1,1,.8],bias:'BS'},
+  {suf:'sus2',iv:[0,2,7],w:[1,1,.8],bias:'BS2'}];
 const TPL=[];
 for(const ty of TYPES)for(let r=0;r<12;r++){
   const v=new Float32Array(12);ty.iv.forEach((iv,i)=>v[(r+iv)%12]=ty.w[i]);
-  let nrm=0;for(const a of v)nrm+=a*a;TPL.push({root:r,suf:ty.suf,v,nrm:Math.sqrt(nrm),bias:ty.bias});
+  let nrm=0;for(const a of v)nrm+=a*a;TPL.push({root:r,suf:ty.suf,iv:ty.iv,v,nrm:Math.sqrt(nrm),bias:ty.bias});
 }
-function scoreAll(ch,bass){
+// kunci lagu (Krumhansl) -> chord diatonis dapat sedikit bonus
+const KMAJ=[6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88],KMIN=[6.33,2.68,3.52,5.38,2.6,3.53,2.54,4.75,3.98,2.69,3.34,3.17];
+function estimateKey(ch){
+  const corr=(p,r)=>{let mx=0,my=0;for(let i=0;i<12;i++){mx+=ch[(i+r)%12];my+=p[i];}mx/=12;my/=12;let sxy=0,sx=0,sy=0;
+    for(let i=0;i<12;i++){const a=ch[(i+r)%12]-mx,b=p[i]-my;sxy+=a*b;sx+=a*a;sy+=b*b;}return sxy/Math.sqrt(sx*sy+1e-12);};
+  let best={tonic:0,minor:false,r:-2};
+  for(let r=0;r<12;r++){const a=corr(KMAJ,r),b=corr(KMIN,r);if(a>best.r)best={tonic:r,minor:false,r:a};if(b>best.r)best={tonic:r,minor:true,r:b};}
+  return best;
+}
+function diatonicSet(key){
+  if(!key||key.r<0.5)return null;
+  const K=key.minor?(key.tonic+3)%12:key.tonic,set=new Set();
+  const add=(d,sufs)=>sufs.forEach(su=>set.add(((K+d)%12)+'|'+su));
+  add(0,['','maj7','sus2','sus4']);add(2,['m','m7']);add(4,['m','m7']);add(5,['','maj7','sus2']);add(7,['','7','sus4']);add(9,['m','m7']);
+  add(4,['','7']); // V dari relatif minor (mis. E/E7 di kunci Am)
+  return set;
+}
+let KEYSET=null;
+function scoreAll(ch,bass,bassPc){
   const out=new Float32Array(TPL.length);
   let mx=0,sum=0;for(const a of ch){if(a>mx)mx=a;sum+=a;}
   if(mx<=0)return out;
   const mean=sum/12,c=new Float32Array(12);let nc=0;
-  for(let i=0;i<12;i++){const v=Math.max(0,ch[i]-mean*0.5)/mx;c[i]=Math.pow(v,1.5);nc+=c[i]*c[i];}
+  for(let i=0;i<12;i++){const v=Math.max(0,ch[i]-mean*0.4)/mx;c[i]=Math.pow(v,1.4);nc+=c[i]*c[i];}
   nc=Math.sqrt(nc);if(nc<=0)return out;
-  let bp=-1,bm=0,bs=0;if(bass){for(let i=0;i<12;i++){bs+=bass[i];if(bass[i]>bm){bm=bass[i];bp=i;}}}
-  const strongBass=bp>=0&&bm>bs*0.3;
+  if(bassPc==null&&bass){let bm=0,bs=0;for(let i=0;i<12;i++){bs+=bass[i];if(bass[i]>bm){bm=bass[i];bassPc=i;}}if(bm<bs*0.3)bassPc=-1;}
   TPL.forEach((t,i)=>{let d=0;for(let k=0;k<12;k++)d+=c[k]*t.v[k];
-    out[i]=d/(nc*t.nrm)*t.bias+(strongBass&&t.root===bp?0.07:0);});
+    let sc=d/(nc*t.nrm)*(typeof t.bias==='string'?CP[t.bias]:t.bias);
+    if(bassPc!=null&&bassPc>=0){if(t.root===bassPc)sc+=0.08;else if(!t.iv.some(iv=>(t.root+iv)%12===bassPc))sc-=0.03;}
+    if(KEYSET&&KEYSET.has(t.root+'|'+t.suf))sc+=0.03;
+    out[i]=sc;});
   return out;
 }
-function matchChord(ch,bass){
-  const sc=scoreAll(ch,bass);let best=-1,bs=0;
+function matchChord(ch,bass,bassPc){
+  const sc=scoreAll(ch,bass,bassPc);let best=-1,bs=0;
   for(let i=0;i<sc.length;i++)if(sc[i]>bs){bs=sc[i];best=i;}
   return bs<0.6?{id:-1,score:bs}:{id:best,score:bs};
 }
 const chordName=id=>NOTE[TPL[id].root]+TPL[id].suf;
 
 /* ---------- bentuk chord (diagram) ---------- */
-const OPEN={'C':[-1,3,2,0,1,0],'D':[-1,-1,0,2,3,2],'G':[3,2,0,0,0,3],'Dm':[-1,-1,0,2,3,1],'D7':[-1,-1,0,2,1,2],'G7':[3,2,0,0,0,1],'C7':[-1,3,2,3,1,0],'B7':[-1,2,1,2,0,2]};
+const OPEN={'C':[-1,3,2,0,1,0],'D':[-1,-1,0,2,3,2],'G':[3,2,0,0,0,3],'Dm':[-1,-1,0,2,3,1],'D7':[-1,-1,0,2,1,2],'G7':[3,2,0,0,0,1],'C7':[-1,3,2,3,1,0],'B7':[-1,2,1,2,0,2],
+  'Cmaj7':[-1,3,2,0,0,0],'Fmaj7':[-1,-1,3,2,1,0],'Dmaj7':[-1,-1,0,2,2,2],'Gmaj7':[3,2,0,0,0,2],'Dm7':[-1,-1,0,2,1,1],'Dsus4':[-1,-1,0,2,3,3],'Dsus2':[-1,-1,0,2,3,0],'Gsus4':[3,-1,0,0,1,3],'Csus2':[-1,3,0,0,1,3],'Csus4':[-1,3,3,0,1,1]};
+const SHAPE_E={'':[0,2,2,1,0,0],'m':[0,2,2,0,0,0],'7':[0,2,0,1,0,0],'maj7':[0,-1,1,1,0,-1],'m7':[0,2,0,0,0,0],'sus4':[0,2,2,2,0,0],'sus2':null};
+const SHAPE_A={'':[-1,0,2,2,2,0],'m':[-1,0,2,2,1,0],'7':[-1,0,2,0,2,0],'maj7':[-1,0,2,1,2,0],'m7':[-1,0,2,0,1,0],'sus4':[-1,0,2,2,3,0],'sus2':[-1,0,2,2,0,0]};
 function shapeFor(id){
   if(id<0)return null;
   const T=tun(),t=TPL[id],pc=(t.root+T.shift)%12,key=NOTE[pc]+t.suf;
   let s=OPEN[key]?OPEN[key].slice():null;
   if(!s){
-    const r6=(pc-4+12)%12,r5=(pc-9+12)%12;
-    if(r6<=r5){const r=r6;
-      s=t.suf==='m'?[r,r+2,r+2,r,r,r]:t.suf==='7'?[r,r+2,r,r+1,r,r]:[r,r+2,r+2,r+1,r,r];
-    }else{const r=r5;
-      s=t.suf==='m'?[-1,r,r+2,r+2,r+1,r]:t.suf==='7'?[-1,r,r+2,r,r+2,r]:[-1,r,r+2,r+2,r+2,r];
-    }
+    const r6=(pc-4+12)%12,r5=(pc-9+12)%12,E=SHAPE_E[t.suf],A=SHAPE_A[t.suf];
+    const useE=E&&(r6<=r5||!A);
+    const r=useE?r6:r5,base=useE?E:A;
+    s=base.map(f=>f<0?-1:f+r);
   }
   if(T.drop&&s[0]>=0)s[0]+=2;
   return s;
@@ -501,43 +557,66 @@ function computeRange(track){
   track.range={lo,hi};
 }
 
-/* ---------- analisis file ---------- */
-const tick0=()=>new Promise(r=>setTimeout(r,0));
-async function analyze(samples,sr,len,name,source,onP){
-  // melodi
-  const f2=Math.max(1,Math.round(sr/22050)),sr2=sr/f2;
-  const x=downsample(samples,f2,len);
-  const N=1024,det=makeDetector(sr2,N),hop=Math.max(1,Math.round(sr2*0.01));
-  const total=Math.max(0,Math.floor((x.length-N)/hop)+1);
-  const frames=[];let maxR=0;
-  for(let i=0;i<total;i++){
-    const o=i*hop,r=det(x.subarray(o,o+N));
-    frames.push({t:(o+N/2)/sr2,midi:toMidi(r.f),rms:r.rms});
-    if(r.rms>maxR)maxR=r.rms;
-    if(i%150===149){onP&&onP(0.75*i/total);await tick0();}
+
+/* ---------- pelacak melodi dominan (salience harmonik + Viterbi) untuk lagu berpengiring ---------- */
+async function salienceTrack(x,sr,hop,onP){
+  const n=2048,F=getFFT(n),re=F.re,im=F.im;
+  const BMIN=75,S=Math.floor(60*Math.log2(1400/BMIN))+1; // 20 sen per state
+  const kmax=Math.min(n/2-2,Math.floor(5000*n/sr));
+  const sal=[],times=[],peakAmp=new Float32Array(kmax+2);
+  for(let c=0,o=0;o+n<=x.length+n/2;c++,o=c*hop){
+    const st=o-n/2;
+    for(let i=0;i<n;i++){const j=F.rev[i],v=(st+i>=0&&st+i<x.length)?x[st+i]:0;re[j]=v*F.win[i];im[j]=0;}
+    fftInPlace(F);
+    let mx=0;for(let k=1;k<=kmax+1;k++){const m=Math.hypot(re[k],im[k]);peakAmp[k]=m;if(m>mx)mx=m;}
+    const v=new Float32Array(S),v1=new Float32Array(S);
+    if(mx>1e-4){
+      for(let k=2;k<=kmax;k++){
+        const m=peakAmp[k];if(m<mx*0.01||m<peakAmp[k-1]||m<peakAmp[k+1])continue;
+        const a=Math.log(peakAmp[k-1]+1e-9),b=Math.log(m),cc=Math.log(peakAmp[k+1]+1e-9),den=a-2*b+cc;
+        const off=den<0?0.5*(a-cc)/den:0,f=(k+off)*sr/n,amp=Math.pow(m/mx,0.7);
+        for(let h=1;h<=8;h++){
+          const f0=f/h;if(f0<BMIN)break;if(f0>1400)continue;
+          const bc=60*Math.log2(f0/BMIN),w=amp*Math.pow(0.8,h-1);
+          const lo=Math.max(0,Math.ceil(bc-5)),hi=Math.min(S-1,Math.floor(bc+5));
+          for(let b2=lo;b2<=hi;b2++){const d=(b2-bc)/5,q=w*Math.cos(d*Math.PI/2)**2;v[b2]+=q;if(h===1&&q>v1[b2])v1[b2]=q;}
+        }
+      }
+    }
+    // calon nada tanpa fundamental yang terdengar -> kemungkinan sub-harmonik palsu
+    for(let b2=0;b2<S;b2++)if(v1[b2]<CP.FP)v[b2]*=CP.FPF;
+    sal.push(v);times.push(o/sr);
+    if(c%300===299){onP&&onP(0.8*o/x.length);await tick0();}
   }
-  const gate=Math.max(0.003,maxR*0.07);
-  for(const f of frames)if(f.rms<gate)f.midi=null;
-  const raw=frames.map(f=>f.midi);
-  for(let i=0;i<frames.length;i++){
-    if(raw[i]==null)continue;
-    const w=[];for(let k=i-2;k<=i+2;k++)if(k>=0&&k<raw.length&&raw[k]!=null)w.push(raw[k]);
-    w.sort((a,b)=>a-b);frames[i].midi=w[w.length>>1];
+  // normalisasi global
+  const tops=sal.map(v=>{let m=0;for(const a of v)if(a>m)m=a;return m;}).sort((a,b)=>a-b);
+  const ref=tops[Math.floor(tops.length*0.9)]||1;
+  // Viterbi: S pitch state + 1 state diam
+  const U=S,NS=S+1,LOC=5,LC=0.03,JMP=0.35,VU=0.45,UTH=0.32;
+  let V=new Float32Array(NS);const back=[];
+  for(let t=0;t<sal.length;t++){
+    const e=sal[t],nv=new Float32Array(NS),bk=new Int16Array(NS);
+    let gm=-1e9,ga=0;for(let s2=0;s2<S;s2++)if(V[s2]>gm){gm=V[s2];ga=s2;}
+    for(let s2=0;s2<S;s2++){
+      let best=V[U]-VU,arg=U;
+      if(gm-JMP>best){best=gm-JMP;arg=ga;}
+      for(let d=-LOC;d<=LOC;d++){const q=s2+d;if(q<0||q>=S)continue;const val=V[q]-LC*Math.abs(d);if(val>best){best=val;arg=q;}}
+      nv[s2]=best+Math.min(1.3,e[s2]/ref);bk[s2]=arg;
+    }
+    let bu=V[U],au=U;if(gm-VU>bu){bu=gm-VU;au=ga;}
+    nv[U]=bu+UTH;bk[U]=au;
+    V=nv;back.push(bk);
   }
-  const track={source,name,frames,notes:[],chords:[],duration:len/sr};
-  const seg=makeSegmenter(track,()=>gate);
-  for(const f of frames)seg.feed(f);
-  seg.finish();assignAll(track);computeRange(track);
-  // chord
-  const f4=Math.max(1,Math.round(sr/11025)),sr4=sr/f4,x4=downsampleLP(samples,f4,len);
-  const CN=4096,hop4=Math.round(sr4*0.1),tot4=Math.max(0,Math.floor((x4.length-CN)/hop4)+1);
-  const cf=[];let maxC=0;
-  for(let i=0;i<tot4;i++){
-    const o=i*hop4,c=chromaOf(x4.subarray(o,o+CN),sr4);
-    cf.push({t:(o+CN/2)/sr4,ch:c.ch,bass:c.bass,rms:c.rms});if(c.rms>maxC)maxC=c.rms;
-    if(i%40===39){onP&&onP(0.75+0.25*i/tot4);await tick0();}
-  }
-  const SM=6,cg=Math.max(0.002,maxC*0.08),K=TPL.length,NS=K+1,PEN=0.6,NSC=0.6;
+  const path=new Int16Array(sal.length);
+  if(sal.length){let st=0,bm=-1e9;for(let s2=0;s2<NS;s2++)if(V[s2]>bm){bm=V[s2];st=s2;}
+    for(let t=sal.length-1;t>=0;t--){path[t]=st;st=back[t][st];}}
+  return {times,path,U,sal,ref,BMIN};
+}
+
+function decodeChords(cf,cg,hopS,track){
+  const SM=CP.SM,K=TPL.length,NS=K+1,PEN=CP.PEN,NSC=0.6;
+  const tot=new Float32Array(12);for(const f of cf)if(f.rms>=cg)for(let p=0;p<12;p++)tot[p]+=f.ch[p];
+  track.key=estimateKey(tot);KEYSET=CP.KEY?diatonicSet(track.key):null;
   const back=[];let V=new Float32Array(NS);
   for(let i=0;i<cf.length;i++){
     const em=new Float32Array(NS);
@@ -550,23 +629,203 @@ async function analyze(samples,sr,len,name,source,onP){
     }
     let pm=-1e9,pa=0;for(let j=0;j<NS;j++)if(V[j]>pm){pm=V[j];pa=j;}
     const nv=new Float32Array(NS),bk=new Int16Array(NS);
-    for(let j=0;j<NS;j++){
-      const stay=V[j],sw=pm-PEN;
-      if(i===0||stay>=sw){nv[j]=stay+em[j];bk[j]=j;}else{nv[j]=sw+em[j];bk[j]=pa;}
-    }
+    for(let j=0;j<NS;j++){const stay=V[j],sw=pm-PEN;
+      if(i===0||stay>=sw){nv[j]=stay+em[j];bk[j]=j;}else{nv[j]=sw+em[j];bk[j]=pa;}}
     V=nv;back.push(bk);
   }
-  const lab2=new Array(cf.length);
+  KEYSET=null;
+  const lab=new Array(cf.length);
   if(cf.length){let st=0,bm=-1e9;for(let j=0;j<NS;j++)if(V[j]>bm){bm=V[j];st=j;}
-    for(let i=cf.length-1;i>=0;i--){lab2[i]=st===K?-1:st;st=back[i][st];}}
+    for(let i=cf.length-1;i>=0;i--){lab[i]=st===K?-1:st;st=back[i][st];}}
   let segs=[];
-  for(let i=0;i<lab2.length;i++){
-    const t=cf[i].t-hop4/sr4/2;
-    if(segs.length&&segs[segs.length-1].id===lab2[i])segs[segs.length-1].t1=t+hop4/sr4;
-    else segs.push({id:lab2[i],t0:t,t1:t+hop4/sr4});
+  for(let i=0;i<lab.length;i++){
+    const t=cf[i].t-hopS/2;
+    if(segs.length&&segs[segs.length-1].id===lab[i])segs[segs.length-1].t1=t+hopS;
+    else segs.push({id:lab[i],t0:t,t1:t+hopS});
   }
   segs=segs.filter(sg=>sg.t1-sg.t0>=0.3||sg.id<0);
-  track.chords=segs.filter(s=>s.id>=0).map(s=>({t0:Math.max(0,s.t0),t1:s.t1,id:s.id,name:chordName(s.id)}));
+  // tentukan ulang chord 7 / maj7 / m7 dari kekuatan nada ke-7 dibanding nada ke-3
+  track.r7=[];
+  if(CP.R7)for(const sg of segs){
+    if(sg.id<0)continue;const T=TPL[sg.id],r=T.root;
+    if(!['','m','7','maj7','m7'].includes(T.suf))continue;
+    const minor=T.suf==='m'||T.suf==='m7';
+    const acc=new Float32Array(PM1+1);let n=0;
+    for(const f of cf){if(f.t<sg.t0||f.t>sg.t1||f.rms<cg||!f.a)continue;for(let m=40;m<=PM1;m++)acc[m]+=f.a[m];n++;}
+    if(!n)continue;
+    const pk=(pc,comp)=>{let v=0;for(let m=40;m<=PM1;m++){if(m%12!==pc)continue;let x=acc[m];if(comp)x-=CP.HC*((m-19>=PM0?acc[m-19]:0)+0.6*(m-28>=PM0?acc[m-28]:0));if(x>v)v=x;}return Math.max(0,v);};
+    const a3=pk((r+(minor?3:4))%12),a5=pk((r+7)%12),ref=Math.max(1e-9,Math.min(a3,a5));
+    const b7=pk((r+10)%12,true)/ref,M7=pk((r+11)%12,true)/ref;
+    track.r7.push({t0:sg.t0,t1:sg.t1,root:r,minor,b7,M7});
+    let suf=minor?'m':'';
+    if(minor){if(b7>CP.R7m)suf='m7';}
+    else if(b7>CP.R7&&b7>=M7)suf='7';else if(M7>CP.R7M)suf='maj7';
+    const id=TPL.findIndex(t=>t.root===r&&t.suf===suf);if(id>=0)sg.id=id;
+  }
+  const out=[];for(const sg of segs){if(sg.id<0)continue;const p=out[out.length-1];if(p&&p.id===sg.id&&sg.t0-p.t1<0.35)p.t1=sg.t1;else out.push({t0:Math.max(0,sg.t0),t1:sg.t1,id:sg.id,name:chordName(sg.id)});}
+  return out;
+}
+/* ---------- analisis file ---------- */
+async function detectOnsets(x,sr){
+  const n=1024,hop=Math.round(sr*CP.OH),F=getFFT(n),re=F.re,im=F.im;
+  const k0=Math.floor(150*n/sr),k1=Math.min(n/2-1,Math.floor(5000*n/sr));
+  let prev=new Float32Array(k1+1),cur=new Float32Array(k1+1);
+  const flux=[],tt=[];
+  for(let o=0,c=0;o+n<=x.length;o+=hop,c++){
+    for(let i=0;i<n;i++){const j=F.rev[i];re[j]=x[o+i]*F.win[i];im[j]=0;}
+    fftInPlace(F);
+    let fl=0;
+    for(let k=k0;k<=k1;k++){const v=Math.log1p(100*Math.hypot(re[k],im[k]));const d=v-prev[k];if(d>0)fl+=d;cur[k]=v;}
+    flux.push(c?fl:0);tt.push((o+n/2)/sr);
+    const tmp=prev;prev=cur;cur=tmp;
+    if(c%400===399)await tick0();
+  }
+  let mx=0;for(const v of flux)if(v>mx)mx=v;
+  const on=[];let last=-1;
+  for(let i=1;i<flux.length-1;i++){
+    let lm=true;for(let k=Math.max(0,i-3);k<=Math.min(flux.length-1,i+3);k++)if(flux[k]>flux[i]){lm=false;break;}
+    if(!lm)continue;
+    let sum=0,cnt=0;for(let k=Math.max(0,i-16);k<=Math.min(flux.length-1,i+4);k++){sum+=flux[k];cnt++;}
+    if(flux[i]<sum/cnt*1.5+mx*0.05)continue;
+    const t=tt[i]-0.01;
+    if(last>=0&&t-last<0.05)continue;
+    on.push(t);last=t;
+  }
+  return on;
+}
+function buildNotes(frames,onsets,reattack){
+  const notes=[];if(!frames.length)return notes;
+  const dt=frames.length>1?frames[1].t-frames[0].t:0.01;
+  // batas: onset + perubahan pitch stabil tanpa onset (legato/slide)
+  const bounds=onsets.slice();
+  let run=null,base=null,bn=0;
+  for(let i=0;i<frames.length;i++){
+    const m=frames[i].midi;if(m==null){base=null;run=null;bn=0;continue;}
+    const r=Math.round(m);
+    if(base==null){base=r;bn=1;continue;}
+    if(r===base){bn++;run=null;continue;}
+    if(run&&run.r===r)run.n++;else run={r,n:1,i};
+    if(run.n>=5){
+      let abrupt=false;
+      for(let k=Math.max(1,run.i-2);k<=run.i;k++){const p=frames[k-1].midi,q=frames[k].midi;if(p==null||q==null||Math.abs(q-p)>=0.6){abrupt=true;break;}}
+      if(bn>=5&&abrupt)bounds.push(frames[run.i].t-dt*0.5);
+      base=r;bn=run.n;run=null;
+    }
+  }
+  bounds.sort((a,b)=>a-b);
+  const B=[];for(const b of bounds)if(!B.length||b-B[B.length-1]>0.04)B.push(b);
+  B.push(frames[frames.length-1].t+1);
+  let fi=0;
+  const seg=(s,e)=>{
+    // kumpulkan frame bersuara dalam [s,e)
+    const fr=[];while(fi<frames.length&&frames[fi].t<s)fi++;
+    let j=fi;while(j<frames.length&&frames[j].t<e){if(frames[j].midi!=null)fr.push(frames[j]);j++;}
+    if(fr.length<3)return;
+    // pecah lagi kalau ada jeda tanpa suara > 60ms
+    let groups=[[fr[0]]];
+    for(let k=1;k<fr.length;k++){if(fr[k].t-fr[k-1].t>0.06)groups.push([]);groups[groups.length-1].push(fr[k]);}
+    for(const g of groups){
+      if(g.length<3)continue;
+      const t0=g[0].t-dt*0.5,t1=g[g.length-1].t+dt*0.5;
+      const body=g.filter(f=>f.t>=t0+0.03);
+      const use=(body.length>=3?body:g).map(f=>f.midi).sort((a,b)=>a-b);
+      const midi=Math.round(use[use.length>>1]);
+      if(t1-t0<0.05)continue;
+      notes.push({t0,t1,midi});
+    }
+  };
+  let prevB=frames[0].t-1;
+  for(const b of B){seg(prevB,b);prevB=b;}
+  // gabungkan nada sama yang bersambung tanpa onset
+  const onSet=onsets;
+  const out=[];
+  for(const n of notes){
+    const p=out[out.length-1];
+    const onsetHere=onSet.some(o=>Math.abs(o-n.t0)<0.03);
+    if(p&&p.midi===n.midi&&n.t0-p.t1<0.06&&(!onsetHere||(reattack&&!reattack(n.t0,n.midi))))p.t1=n.t1;else out.push(n);
+  }
+  return out;
+}
+const tick0=()=>new Promise(r=>setTimeout(r,0));
+async function analyze(samples,sr,len,name,source,onP){
+  // melodi
+  const f2=Math.max(1,Math.round(sr/22050)),sr2=sr/f2;
+  const x=downsampleLP(samples,f2,len);
+  const N=1024,det=makeDetector(sr2,N),hop=Math.max(1,Math.round(sr2*0.01));
+  const st=await salienceTrack(x,sr2,hop,p=>onP&&onP(0.5*p));
+  const S0=12*Math.log2(st.BMIN/440)+69,nF=st.path.length;
+  const slice=t=>{const o=Math.round(t*sr2-N/2);return(o>=0&&o+N<=x.length)?x.subarray(o,o+N):null;};
+  const frames=new Array(nF);let maxR=0;
+  for(let i=0;i<nF;i++){
+    const t=i*hop/sr2,o=Math.max(0,Math.round(t*sr2-N/2)),e=Math.min(x.length,o+N);let q=0;
+    for(let k=o;k<e;k++)q+=x[k]*x[k];const rms=Math.sqrt(q/Math.max(1,e-o));
+    frames[i]={t,midi:null,rms};if(rms>maxR)maxR=rms;
+  }
+  const gate=Math.max(0.003,maxR*0.07);
+  // ada iringan? (cek sebagian frame dengan YIN: kalau jarang yakin berarti polifonik)
+  let loud=0,unsure=0;
+  for(let i=0;i<nF;i+=6){if(frames[i].rms<gate*2)continue;const sl=slice(frames[i].t);if(!sl)continue;loud++;const r=det(sl);if(!r.f||r.clar<0.88)unsure++;}
+  const backing=loud>4&&unsure/loud>0.3;
+  for(let i=0;i<nF;i++){
+    const fr=frames[i];if(fr.rms<gate)continue;
+    const s2=st.path[i];
+    if(s2!==st.U){
+      const v=st.sal[i];let off=0;
+      if(s2>0&&s2<st.U-1){const a=v[s2-1],b=v[s2],c=v[s2+1],den=a-2*b+c;if(den<0)off=Math.max(-0.5,Math.min(0.5,0.5*(a-c)/den));}
+      fr.midi=S0+(s2+off)/5;
+    }else if(!backing){const sl=slice(fr.t);if(sl){const r=det(sl);if(r.f)fr.midi=toMidi(r.f);}}
+  }
+  const fidx=t=>Math.max(0,Math.min(nF-1,Math.round(t*sr2/hop)));
+  const salAt=(a,b,m)=>{const c=Math.round((m-S0)*5);let s2=0,n2=0;
+    for(let i=fidx(a);i<=fidx(b);i++){const v=st.sal[i];for(let k=c-3;k<=c+3;k++)if(k>=0&&k<v.length)s2+=v[k];n2++;}return n2?s2/n2:0;};
+  const reatt=backing?(t,m)=>salAt(t+CP.RA1,t+CP.RA2,m)>salAt(t-CP.RA2,t-CP.RA1,m)*1.2:null;
+  for(const f of frames)if(f.rms<gate)f.midi=null;
+  const raw=frames.map(f=>f.midi);
+  for(let i=0;i<frames.length;i++){
+    if(raw[i]==null)continue;
+    const w=[];for(let k=i-2;k<=i+2;k++)if(k>=0&&k<raw.length&&raw[k]!=null)w.push(raw[k]);
+    w.sort((a,b)=>a-b);frames[i].midi=w[w.length>>1];
+  }
+  const track={source,name,frames,notes:[],chords:[],duration:len/sr};
+  const onsets=await detectOnsets(x,sr2);
+  track.notes=buildNotes(frames,onsets,reatt);
+  assignAll(track);computeRange(track);
+  // chord
+  const f4=Math.max(1,Math.round(sr/11025)),sr4=sr/f4,x4=downsampleLP(samples,f4,len);
+  const CN=4096,hop4=Math.round(sr4*0.1),tot4=Math.max(0,Math.floor((x4.length-CN)/hop4)+1);
+  const raw4=[];let maxC=0;
+  for(let i=0;i<tot4;i++){
+    const o=i*hop4,c=chromaOf(x4.subarray(o,o+CN),sr4);
+    raw4.push({t:(o+CN/2)/sr4,a:c.a,ch:c.ch,bass:c.bass,rms:c.rms});if(c.rms>maxC)maxC=c.rms;
+    if(i%40===39){onP&&onP(0.75+0.2*i/tot4);await tick0();}
+  }
+  const cg=Math.max(0.002,maxC*0.08);
+  let chords=decodeChords(raw4,cg,hop4/sr4,track);
+  // ada melodi solo di atas iringan? (banyak nada melodi bukan anggota chord) -> buang nada solo lalu ulangi
+  if(CP.MR>0&&track.notes.length>=6){
+    let inC=0,tot=0;
+    for(const nt of track.notes){const c=chords.find(c=>nt.t0>=c.t0&&nt.t0<c.t1);if(!c)continue;tot++;const T=TPL[c.id];if(T.iv.some(iv=>(T.root+iv)%12===nt.midi%12))inC++;}
+    track.leadRatio=tot?1-inC/tot:0;
+    // seberapa menonjol nada melodi dibanding nada lain (solo biasanya jauh lebih keras)
+    const dom=[];
+    for(const nt of track.notes){const m=nt.midi;if(m<40||m>PM1)continue;const ds=[];
+      for(const f of raw4){if(f.t<nt.t0+0.05||f.t>nt.t1)continue;let other=0;for(let q=40;q<=PM1;q++){if(Math.abs(q-m)%12===0)continue;if(f.a[q]>other)other=f.a[q];}ds.push(f.a[m]/(other+1e-9));}
+      if(ds.length){ds.sort((x,y)=>x-y);dom.push(ds[ds.length>>1]);}}
+    dom.sort((x,y)=>x-y);track.leadDom=dom.length?dom[dom.length>>1]:0;
+    if(tot&&track.leadDom>=CP.LEAD){
+      const cf2=raw4.map(f=>{
+        const a=Float32Array.from(f.a);let changed=false;
+        for(const nt of track.notes){if(nt.t1<f.t-0.18)continue;if(nt.t0>f.t+0.18)break;
+          const m=nt.midi;if(m<PM0||m>PM1)continue;
+          let other=0;for(let q=40;q<=PM1;q++){if(Math.abs(q-m)%12===0)continue;if(a[q]>other)other=a[q];}
+          if(a[m]>other*CP.MR){a[m]=0;if(m+12<=PM1)a[m+12]*=0.3;if(m+19<=PM1)a[m+19]*=0.5;if(m+24<=PM1)a[m+24]*=0.3;changed=true;}}
+        if(!changed)return f;const cc=chromaFromNotes(a);return{...f,ch:cc.ch,bass:cc.bass};
+      });
+      chords=decodeChords(cf2,cg,hop4/sr4,track);
+    }
+  }
+  track.chords=chords;
+  onP&&onP(1);
   return track;
 }
 
@@ -946,7 +1205,8 @@ function rebuildProg(force){
   const C=track?track.chords:[];
   const sig=C.length+'|'+(C.length?C[C.length-1].id:'');
   if(!force&&sig===progSig)return;progSig=sig;progHL=-1;
-  $('#chordCount').textContent=C.length+' chord';
+  const K=track&&track.key&&track.key.r>0.5&&C.length?` · kunci ${NOTE[track.key.tonic]}${track.key.minor?'m':''}`:'';
+  $('#chordCount').textContent=C.length+' chord'+K;
   if(!C.length){progEl.innerHTML='<p class="empty">Belum ada chord yang terbaca.</p>';return;}
   progEl.innerHTML=C.map((c,i)=>`<button class="cc" type="button" data-i="${i}"><b>${c.name}</b><small>${fmt(c.t0)}</small></button>`).join('');
 }
@@ -990,7 +1250,8 @@ function overlay(text,p){const o=$('#overlay');if(text==null){o.hidden=true;retu
 function setTrack(t,startAt){
   track=t;viewT=startAt||0;$('#srcName').textContent=t.name;tabSig='';rebuildTab(true);rebuildProg(true);ui();render();
 }
-let busy=false;
+let busy=false,pendingFile=null;
+function nextPending(){if(pendingFile){const f=pendingFile;pendingFile=null;loadFile(f);}}
 async function loadDemo(){
   if(busy)return;busy=true;stopMic();player.unload();msg('');
   overlay('Menyiapkan lagu demo…',0);await tick0();
@@ -998,10 +1259,12 @@ async function loadDemo(){
   const t=await analyze(samples,sr,samples.length,'Lagu demo · Am F C G','demo',p=>overlay('Menganalisis lagu demo…',p));
   player.load(URL.createObjectURL(wavBlob(samples,sr)),t.duration,async()=>{ensureCtx();const b=ctx.createBuffer(1,samples.length,sr);b.getChannelData(0).set(samples);return b;});
   overlay(null);busy=false;
+  if(pendingFile){nextPending();return;}
   const n=t.notes.find(x=>x.t0>10.5)||t.notes[0];setTrack(t,n?(n.t0+n.t1)/2:1.2);
 }
 async function loadFile(file){
-  if(busy||!file)return;busy=true;stopMic();player.unload();msg('');
+  if(!file)return;if(busy){pendingFile=file;overlay('File diterima, menunggu analisis sebelumnya selesai…',0);return;}
+  busy=true;stopMic();player.unload();msg('');
   try{
     overlay('Membaca '+file.name+'…',0);
     const ab=await file.arrayBuffer();ensureCtx();
@@ -1018,7 +1281,7 @@ async function loadFile(file){
   }catch(e){
     overlay(null);msg('File ini tidak bisa dibaca browser. Coba format lain: mp3, m4a, wav, atau mp4.');
   }
-  busy=false;
+  busy=false;nextPending();
 }
 
 /* ---------- mic live ---------- */
@@ -1118,6 +1381,7 @@ rebuildProg(true);ui();render();
 setTimeout(loadDemo,40);
 })();
 </script>
+
 <script>
 if('serviceWorker' in navigator){window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').catch(()=>{});});}
 </script>
